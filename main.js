@@ -62,12 +62,11 @@ ipcMain.handle('connect-modbus', async (event, options) => {
         await client.close();
     }
     try {
-        // Thêm 'dataBits' vào đối tượng cấu hình
         await client.connectRTUBuffered(options.comPath, {
             baudRate: parseInt(options.baudRate),
             parity: options.parity,
             stopBits: parseInt(options.stopBits),
-            dataBits: parseInt(options.dataBits), // <-- Dòng được thêm vào
+            dataBits: parseInt(options.dataBits),
         });
         client.setID(SLAVE_ID);
         return { success: true, message: `Kết nối thành công tới ${options.comPath}` };
