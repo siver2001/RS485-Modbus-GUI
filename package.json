@@ -1,0 +1,17 @@
+
+{
+  "name": "rs485-modbus-gui",
+  "version": "1.0.0",
+  "description": "Modbus RTU GUI for Delta MS300",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "modbus-serial": "^8.0.21-no-serial-port",
+    "serialport": "^13.0.0"
+  },
+  "devDependencies": {
+      "electron": "^38.1.2"
+    }
+}

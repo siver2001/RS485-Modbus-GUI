@@ -1,0 +1,17 @@
+# Dependencies
+/node_modules
+
+# Build files
+/out
+/dist
+*.exe
+*.dmg
+*.deb
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Electron
+.electron
