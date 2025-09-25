@@ -8,8 +8,4 @@ contextBridge.exposeInMainWorld('api', {
     readRegister: (params) => ipcRenderer.invoke('read-register', params),
     writeRegister: (params) => ipcRenderer.invoke('write-register', params),
     testConnection: (options) => ipcRenderer.invoke('test-connection', options)
-    // Hàm nhận dữ liệu từ main tới renderer (nếu cần)
-    // on: (channel, callback) => {
-    //     ipcRenderer.on(channel, (event, ...args) => callback(...args));
-    // }
 });
