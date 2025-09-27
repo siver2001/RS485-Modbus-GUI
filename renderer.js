@@ -134,7 +134,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const format = getInputFormat('read');
         const addressInputs = document.querySelectorAll('.dynamic-read-address');
         const valueDisplays = document.querySelectorAll('.dynamic-read-value');
-        
+
+        const slaveId = document.getElementById('slave-id').value; 
         // Sử dụng Promise.all để gửi các yêu cầu đọc song song, tăng tốc độ
         const readPromises = [];
         for (let i = 0; i < addressInputs.length; i++) {
@@ -144,7 +145,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const address = parseInput(addressStr, format);
             if (isNaN(address)) continue;
 
-            readPromises.push(window.api.readRegister({ address, count: 1 }));
+            readPromises.push(window.api.readRegister({ address, count: 1, slaveId }));
         }
 
         try {
@@ -291,6 +292,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const format = getInputFormat('write');
         const addressInputs = document.querySelectorAll('.dynamic-write-address');
         const valueInputs = document.querySelectorAll('.dynamic-write-value');
+
+        const slaveId = document.getElementById('slave-id').value;
+
         log(`Bắt đầu ghi vào ${addressInputs.length} địa chỉ...`);
 
         for (let i = 0; i < addressInputs.length; i++) {
@@ -308,7 +312,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             log(`--> Đang ghi: Địa chỉ ${address} (Dec), Giá trị ${value} (Dec)`);
-            const result = await window.api.writeRegister({ address, value });
+            
+            const result = await window.api.writeRegister({ address, value, slaveId });
 
             if (result.success) {
                 log(`<-- ${result.message}`, 'success');

@@ -9,13 +9,10 @@
     "make": "electron-forge make"
   },
   "dependencies": {
-    "modbus-serial": "^8.0.21-no-serial-port",
-    "serialport": "^13.0.0"
+    "modbus-serial": "^8.0.17"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.4.0",
-    "@electron-forge/maker-deb": "^7.4.0",
-    "@electron-forge/maker-rpm": "^7.4.0",
     "@electron-forge/maker-squirrel": "^7.4.0",
     "@electron-forge/maker-zip": "^7.4.0",
     "electron": "^38.1.2"
@@ -38,10 +35,6 @@
           "platforms": [
             "darwin"
           ]
-        },
-        {
-          "name": "@electron-forge/maker-deb",
-          "config": {}
         }
       ]
     }

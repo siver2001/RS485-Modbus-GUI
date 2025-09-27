@@ -67,6 +67,7 @@ ipcMain.handle('connect-modbus', async (event, options) => {
     }
 
     client = new ModbusRTU(); // Tạo một client mới để đảm bảo trạng thái sạch
+    client.setTimeout(1000);
     client.setID(parseInt(options.slaveId || '1', 10)); // Đặt Slave ID mặc định là 1 nếu không được cung cấp
 
     try {
@@ -203,8 +204,7 @@ ipcMain.handle('read-register', async (event, { address, count }) => {
     if (!checkPortStatus()) {
         return { success: false, message: 'Không có kết nối Modbus. Vui lòng kết nối trước.' };
     }
-    const slaveId = parseInt(document.getElementById('slave-id').value || '1', 10); // Lấy Slave ID từ giao diện
-    client.setID(slaveId); // Đảm bảo Slave ID được cập nhật cho mỗi lần đọc/ghi
+    client.setID(parseInt(slaveId || '1', 10));
 
     try {
         const data = await client.readHoldingRegisters(address, count);
@@ -225,8 +225,7 @@ ipcMain.handle('write-register', async (event, { address, value }) => {
     if (!checkPortStatus()) {
         return { success: false, message: 'Không có kết nối Modbus. Vui lòng kết nối trước.' };
     }
-    const slaveId = parseInt(document.getElementById('slave-id').value || '1', 10);
-    client.setID(slaveId);
+    client.setID(parseInt(slaveId || '1', 10)); 
 
     try {
         await client.writeRegister(address, value);
