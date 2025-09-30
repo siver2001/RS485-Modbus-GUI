@@ -36,7 +36,7 @@
         main.container {
             display: grid;
             grid-template-columns: 1fr 1.3fr; /* Điều chỉnh tỉ lệ 2 cột chính */
-            grid-template-rows: auto 1fr; /* Hàng trên (settings/actions) auto, hàng dưới (log) co giãn */
+            grid-template-rows: auto 250px; 
             grid-template-areas:
                 "settings actions"
                 "log log";
@@ -55,7 +55,7 @@
             grid-area: log;
             display: flex;
             flex-direction: column;
-            min-height: 150px; /* Đảm bảo log area có chiều cao tối thiểu */
+            min-height: 0; /* Đặt lại thành 0 để giới hạn 250px mới có hiệu lực tối đa */
         }
         h2, h3 {
             margin-top: 0;
@@ -187,7 +187,7 @@
                 <button class="tab-button" data-tab="write-tab">Ghi Thanh Ghi</button>
             </div>
 
-            <div id="read-tab" class="tab-content active">
+            <<div id="read-tab" class="tab-content active">
                 <h2>Đọc nhiều địa chỉ</h2>
                 <div class="form-group radio-group">
                     <label>Định dạng địa chỉ nhập:</label>
@@ -195,9 +195,13 @@
                     <label><input type="radio" name="read-format" value="hex"> Hex</label>
                 </div>
                 <div class="form-group">
-                    <label for="read-quantity">Nhập số lượng địa chỉ cần đọc (tối đa 50):</label>
+                    <label for="read-start-address">Địa chỉ bắt đầu (Dec/Hex):</label>
+                    <input type="text" id="read-start-address" value="0">
+                </div>
+                <div class="form-group">
+                    <label for="read-quantity">Nhập số lượng thanh ghi cần đọc (tối đa 20):</label>
                     <div class="confirm-quantity-group">
-                        <input type="number" id="read-quantity" min="1" max="50" value="1">
+                        <input type="number" id="read-quantity" min="1" max="20" value="1">
                         <button id="btn-confirm-read-quantity">Xác nhận</button>
                     </div>
                 </div>
@@ -217,7 +221,11 @@
                     <label><input type="radio" name="write-format" value="hex"> Hex</label>
                 </div>
                 <div class="form-group">
-                    <label for="write-quantity">Nhập số lượng địa chỉ cần ghi (tối đa 50):</label>
+                    <label for="write-start-address">Địa chỉ bắt đầu (Dec/Hex):</label>
+                    <input type="text" id="write-start-address" value="0">
+                </div>
+                <div class="form-group">
+                    <label for="write-quantity">Nhập số lượng thanh ghi cần ghi (tối đa 50):</label>
                     <div class="confirm-quantity-group">
                         <input type="number" id="write-quantity" min="1" max="50" value="1">
                         <button id="btn-confirm-write-quantity">Xác nhận</button>

@@ -1,16 +1,21 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const ModbusRTU = require('modbus-serial');
-const SerialPort = require('serialport'); // Hoặc `@serialport/bindings` nếu bạn dùng phiên bản mới
+// Chỉ sử dụng SerialPort
+const { SerialPort } = require('serialport'); 
+// Cần thêm Parser để xử lý dữ liệu đến theo thời gian ngắt giữa các byte (Inter-byte timeout)
+const { InterByteTimeoutParser } = require('@serialport/parser-inter-byte-timeout');
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 let mainWindow;
-let client = new ModbusRTU();
-let isPortOpen = false; // Biến để theo dõi trạng thái cổng Serial
+// THAY THẾ: Biến toàn cục để quản lý cổng Serial và trạng thái
+let serialPort = null;
+let isPortOpen = false;
+let currentSlaveId = 1;
 
 function createWindow() {
     mainWindow = new BrowserWindow({
-        width: 1920, // Tăng chiều rộng để giao diện thoải mái hơn
-        height: 1080, // Tăng chiều cao
+        width: 1920,
+        height: 1080,
         icon: path.join(__dirname, 'assets/icon.png'),
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
@@ -20,7 +25,7 @@ function createWindow() {
     });
 
     mainWindow.loadFile('index.html');
-    // mainWindow.webContents.openDevTools(); // Bỏ comment để mở DevTools
+    // mainWindow.webContents.openDevTools(); 
 }
 
 app.whenReady().then(() => {
@@ -34,25 +39,171 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
+        if (serialPort && serialPort.isOpen) {
+             serialPort.close(); // Đóng cổng nếu đang mở
+        }
         app.quit();
     }
 });
 
-// Hàm kiểm tra cổng COM đang mở hay không
-function checkPortStatus() {
-    // client.isOpen là thuộc tính của modbus-serial, kiểm tra xem cổng có mở không
-    isPortOpen = client.isOpen;
-    return isPortOpen;
+// Hàm tính CRC16-Modbus (Tự triển khai)
+function calculateCRC16(buffer) {
+    let crc = 0xFFFF;
+    for (let i = 0; i < buffer.length; i++) {
+        crc ^= buffer.readUInt8(i);
+        for (let j = 0; j < 8; j++) {
+            if (crc & 0x0001) {
+                crc >>= 1;
+                crc ^= 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    // Trả về Buffer 2 byte (Low Byte, High Byte)
+    const crcBuffer = Buffer.alloc(2);
+    crcBuffer.writeUInt16LE(crc, 0); 
+    return crcBuffer;
 }
+
+// Hàm tạo gói tin Modbus RTU (Đọc Holding Register - FC 0x03)
+function createReadRequest(slaveId, address, count) {
+    const pdu = Buffer.alloc(6);
+    pdu.writeUInt8(slaveId, 0); // Slave ID
+    pdu.writeUInt8(0x03, 1);    // Function Code: Read Holding Registers
+    pdu.writeUInt16BE(address, 2); // Start Address (Big Endian)
+    pdu.writeUInt16BE(count, 4);   // Quantity of Registers (Big Endian)
+    
+    const crc = calculateCRC16(pdu.slice(0, 6)); 
+    return Buffer.concat([pdu, crc]);
+}
+
+// Hàm tạo gói tin Modbus RTU (Ghi Single Register - FC 0x06)
+function createWriteRequest(slaveId, address, value) {
+    const pdu = Buffer.alloc(6);
+    pdu.writeUInt8(slaveId, 0); // Slave ID
+    pdu.writeUInt8(0x06, 1);    // Function Code: Write Single Register
+    pdu.writeUInt16BE(address, 2); // Register Address (Big Endian)
+    pdu.writeUInt16BE(value, 4);   // Data Value (Big Endian)
+    
+    const crc = calculateCRC16(pdu.slice(0, 6)); 
+    return Buffer.concat([pdu, crc]);
+}
+
+// Hàm gửi yêu cầu và chờ phản hồi với timeout
+async function sendRequestAndAwaitResponse(requestBuffer, timeout = 2000) {
+    return new Promise((resolve, reject) => {
+        if (!serialPort || !serialPort.isOpen) {
+            return reject(new Error('Cổng Serial chưa mở.'));
+        }
+
+        // Đặt timeout cho cả giao dịch
+        const timeoutId = setTimeout(() => {
+            reject(new Error('Timed out: Thiết bị Modbus không phản hồi.'));
+        }, timeout);
+
+        // Lắng nghe dữ liệu
+        const onData = (data) => {
+            clearTimeout(timeoutId); // Xóa timeout nếu có phản hồi
+            serialPort.off('data', onData); // Ngừng lắng nghe để không nhận gói tiếp theo
+            resolve(data);
+        };
+        
+        serialPort.on('data', onData);
+
+        // Gửi yêu cầu
+        serialPort.write(requestBuffer, (err) => {
+            if (err) {
+                clearTimeout(timeoutId);
+                serialPort.off('data', onData);
+                reject(new Error(`Lỗi gửi dữ liệu: ${err.message}`));
+            }
+        });
+    });
+}
+
+// Hàm kiểm tra CRC của gói phản hồi
+function isResponseValid(responseBuffer) {
+    if (responseBuffer.length < 5) return false;
+    const receivedCrc = responseBuffer.slice(responseBuffer.length - 2);
+    const calculatedCrc = calculateCRC16(responseBuffer.slice(0, responseBuffer.length - 2));
+    
+    // So sánh 2 byte CRC
+    return receivedCrc[0] === calculatedCrc[0] && receivedCrc[1] === calculatedCrc[1];
+}
+
+// Hàm phân tích gói tin Modbus RTU Phản hồi
+function parseResponse(responseBuffer, expectedSlaveId, expectedFunctionCode, expectedDataRegisters) {
+    if (responseBuffer.length < 5) {
+        throw new Error("Phản hồi Modbus quá ngắn, không hợp lệ.");
+    }
+
+    const slaveId = responseBuffer.readUInt8(0);
+    const functionCode = responseBuffer.readUInt8(1);
+    
+    // 1. Kiểm tra Slave ID
+    if (slaveId !== expectedSlaveId) {
+        throw new Error(`Slave ID không khớp (nhận: ${slaveId}, chờ: ${expectedSlaveId}).`);
+    }
+
+    // 2. Kiểm tra CRC
+    if (!isResponseValid(responseBuffer)) {
+        throw new Error('Lỗi CRC: Gói tin bị hỏng (CRC không hợp lệ).');
+    }
+
+    // 3. Xử lý Exception (Mã Lỗi: Function Code có bit 7 = 1)
+    if (functionCode > 0x80) {
+        const exceptionCode = responseBuffer.readUInt8(2);
+        throw new Error(`Modbus Exception ${exceptionCode}: ${translateModbusException(exceptionCode)}.`);
+    }
+
+    // 4. Kiểm tra Function Code
+    if (functionCode !== expectedFunctionCode) {
+        throw new Error(`Function Code không khớp (nhận: ${functionCode}, chờ: ${expectedFunctionCode}).`);
+    }
+    
+    // 5. Trích xuất Dữ liệu (chỉ hỗ trợ FC 0x03 và FC 0x06)
+    const result = { functionCode, data: [] };
+
+    if (functionCode === 0x03) {
+        // Phản hồi FC 0x03: SlaveID (1) + FC (1) + Byte Count (1) + Data (N*2) + CRC (2)
+        const byteCount = responseBuffer.readUInt8(2);
+        if (byteCount !== expectedDataRegisters * 2) {
+             throw new Error(`Dữ liệu không khớp: Chờ ${expectedDataRegisters * 2} byte, nhận ${byteCount} byte.`);
+        }
+        for (let i = 0; i < expectedDataRegisters; i++) {
+            // Dữ liệu thanh ghi (2 byte) là Big Endian
+            result.data.push(responseBuffer.readUInt16BE(3 + i * 2)); 
+        }
+    } else if (functionCode === 0x06) {
+        // Phản hồi FC 0x06: SlaveID (1) + FC (1) + Address (2) + Value (2) + CRC (2)
+        // Gói tin này chỉ dùng để xác nhận lệnh ghi thành công.
+        result.data.push(responseBuffer.readUInt16BE(4)); // Giá trị thanh ghi được echo lại
+    }
+
+    return result;
+}
+
+// Hàm dịch mã lỗi Modbus Exception Code
+function translateModbusException(code) {
+    switch(code) {
+        case 1: return 'ILLEGAL FUNCTION (Lệnh không hỗ trợ)';
+        case 2: return 'ILLEGAL DATA ADDRESS (Địa chỉ thanh ghi không tồn tại)';
+        case 3: return 'ILLEGAL DATA VALUE (Giá trị dữ liệu không hợp lệ)';
+        case 4: return 'SLAVE DEVICE FAILURE (Lỗi nội bộ thiết bị Slave)';
+        default: return 'Lỗi Modbus không xác định';
+    }
+}
+
 
 // ===========================================
 // IPC Handlers
 // ===========================================
 
-// Lấy danh sách cổng COM
+// Lấy danh sách cổng COM (Không thay đổi)
 ipcMain.handle('get-com-ports', async () => {
     try {
-        const ports = await SerialPort.SerialPort.list(); // Sử dụng SerialPort.SerialPort.list() cho @serialport/bindings
+        const ports = await SerialPort.list(); 
         return ports.map(port => ({ path: port.path, manufacturer: port.manufacturer }));
     } catch (error) {
         console.error("Error listing COM ports:", error);
@@ -60,183 +211,149 @@ ipcMain.handle('get-com-ports', async () => {
     }
 });
 
-// Kết nối Modbus
+// Kết nối SerialPort (ĐÃ SỬA)
 ipcMain.handle('connect-modbus', async (event, options) => {
-    if (checkPortStatus()) {
-        return { success: false, message: 'Đã có kết nối Modbus đang mở. Vui lòng ngắt kết nối trước.' };
+    if (serialPort && serialPort.isOpen) {
+        return { success: false, message: 'Đã có kết nối SerialPort đang mở. Vui lòng ngắt kết nối trước.' };
     }
-
-    client = new ModbusRTU(); // Tạo một client mới để đảm bảo trạng thái sạch
-    client.setTimeout(1000);
-    client.setID(parseInt(options.slaveId || '1', 10)); // Đặt Slave ID mặc định là 1 nếu không được cung cấp
-
+    
     try {
-        await client.connectRTU(options.comPath, {
+        currentSlaveId = parseInt(options.slaveId || '1', 10);
+        
+        serialPort = new SerialPort({
+            path: options.comPath,
             baudRate: parseInt(options.baudRate, 10),
             dataBits: parseInt(options.dataBits, 10),
             parity: options.parity,
             stopBits: parseInt(options.stopBits, 10)
         });
-        isPortOpen = true; // Cập nhật trạng thái
-        return { success: true, message: `Kết nối Modbus thành công tới ${options.comPath}` };
+
+        // Sử dụng parser inter-byte timeout để tự động cắt gói tin Modbus
+        // Giả sử 50ms là đủ cho T3.5 (SerialPort docs khuyến nghị)
+        const parser = serialPort.pipe(new InterByteTimeoutParser({ interval: 50 })); 
+
+        // Đặt timeout chờ mở cổng
+        await new Promise((resolve, reject) => {
+            const openTimeout = setTimeout(() => {
+                serialPort.close(() => {}); 
+                reject(new Error("Timeout khi mở cổng Serial."));
+            }, 3000); // 3 giây
+            
+            serialPort.once('open', () => {
+                clearTimeout(openTimeout);
+                isPortOpen = true;
+                // Lắng nghe dữ liệu trên parser
+                parser.on('data', () => {
+                    // Khi parser nhận được một gói tin (một frame Modbus RTU), 
+                    // nó sẽ phát ra sự kiện 'data'.
+                    // Trong trường hợp này, chúng ta sẽ để hàm read/write tự lắng nghe gói tin.
+                    // (Chúng ta không cần xử lý data ở đây, chỉ cần biết cổng mở)
+                });
+                resolve();
+            });
+            
+            serialPort.once('error', (err) => {
+                clearTimeout(openTimeout);
+                reject(new Error(`Serial Port Error: ${err.message}`));
+            });
+        });
+
+        return { success: true, message: `Kết nối SerialPort thành công tới ${options.comPath}` };
     } catch (error) {
-        isPortOpen = false; // Cập nhật trạng thái nếu có lỗi
-        console.error("Modbus connection error:", error);
-        // Cố gắng phân biệt lỗi nếu có thể, nhưng chủ yếu vẫn là timeout
-        let errorMessage = 'Lỗi kết nối Modbus. Vui lòng kiểm tra lại cấu hình cổng COM và kết nối vật lý.';
-        if (error.message.includes('Port is not open')) {
-            errorMessage = 'Cổng COM không mở được. Có thể cổng đang bận hoặc không tồn tại.';
-        } else if (error.message.includes('Failed to open serial port')) {
-            errorMessage = `Không thể mở cổng COM ${options.comPath}. Hãy đảm bảo cổng không bị chương trình khác sử dụng.`;
-        } else if (error.message.includes('Timed out')) { // Đây là lỗi phổ biến nhất
-            errorMessage = `Thiết bị Modbus không phản hồi. Hãy kiểm tra:
-             - Cổng COM: ${options.comPath}
-             - Baud Rate: ${options.baudRate}
-             - Data Bits: ${options.dataBits}
-             - Parity: ${options.parity}
-             - Stop Bits: ${options.stopBits}
-             - Slave ID: ${options.slaveId} (hoặc 1 nếu không điền)
-             - Dây kết nối và nguồn của thiết bị Slave.`;
-        }
-        return { success: false, message: errorMessage };
+        isPortOpen = false;
+        console.error("Serial connection error:", error);
+        return { success: false, message: error.message };
     }
 });
 
-// Ngắt kết nối Modbus
+// Ngắt kết nối SerialPort (ĐÃ SỬA)
 ipcMain.handle('disconnect-modbus', async () => {
-    if (!checkPortStatus()) {
-        return { success: false, message: 'Không có kết nối Modbus nào để ngắt.' };
+    if (!isPortOpen) {
+        return { success: false, message: 'Không có kết nối SerialPort nào để ngắt.' };
     }
     try {
-        await client.close(); // Đảm bảo đóng cổng một cách an toàn
-        isPortOpen = false; // Cập nhật trạng thái
-        return { success: true, message: 'Đã ngắt kết nối Modbus.' };
+        await new Promise((resolve, reject) => {
+            serialPort.close((err) => {
+                if (err) return reject(err);
+                isPortOpen = false;
+                serialPort = null;
+                resolve();
+            });
+        });
+        return { success: true, message: 'Đã ngắt kết nối SerialPort.' };
     } catch (error) {
-        console.error("Modbus disconnection error:", error);
+        console.error("Serial disconnection error:", error);
         return { success: false, message: `Lỗi khi ngắt kết nối: ${error.message}` };
     }
 });
 
-// Kiểm tra kết nối
-ipcMain.handle('test-connection', async (event, { connectionOptions, slaveId }) => {
-    // Nếu chưa mở cổng, thì mở tạm để test
-    let tempClient = null;
-    let tempPortOpened = false;
-    let originalSlaveId = client.getID(); // Lưu lại ID gốc
+// Kiểm tra kết nối (SỬA LẠI ĐỂ DÙNG HÀM READ TỰ ĐỊNH NGHĨA)
+ipcMain.handle('test-connection', async (event, { slaveId }) => {
+    // ĐIỀU KIỆN NÀY ĐANG CHẶN VÀ TRẢ VỀ LỖI NẾU CỔNG CHƯA MỞ
+    if (!isPortOpen) {
+        return { success: false, message: 'Vui lòng kết nối cổng COM trước khi kiểm tra kết nối thiết bị.' };
+    }
+
+    const testSlaveId = parseInt(slaveId || '1', 10);
 
     try {
-        if (!checkPortStatus()) { // Nếu cổng chưa mở, tạo client tạm
-            tempClient = new ModbusRTU();
-            tempClient.setID(parseInt(slaveId, 10)); // Đặt Slave ID để test
-            await tempClient.connectRTU(connectionOptions.comPath, {
-                baudRate: parseInt(connectionOptions.baudRate, 10),
-                dataBits: parseInt(connectionOptions.dataBits, 10),
-                parity: connectionOptions.parity,
-                stopBits: parseInt(connectionOptions.stopBits, 10)
-            });
-            tempPortOpened = true;
-        } else { // Nếu cổng đã mở, dùng client hiện tại và chỉ thay đổi Slave ID tạm thời
-            client.setID(parseInt(slaveId, 10));
-            tempClient = client;
-        }
-
-        // Thực hiện một lệnh đọc đơn giản để kiểm tra phản hồi
-        // Ví dụ: Đọc 1 thanh ghi giữ (holding register) tại địa chỉ 0
         const testAddress = 0;
-        await tempClient.readHoldingRegisters(testAddress, 1);
+        const count = 1;
+        
+        const requestBuffer = createReadRequest(testSlaveId, testAddress, count);
+        const responseBuffer = await sendRequestAndAwaitResponse(requestBuffer); 
+
+        // Kiểm tra phản hồi (Nếu thành công sẽ không ném lỗi)
+        parseResponse(responseBuffer, testSlaveId, 0x03, count); 
         
         return { success: true, message: 'Kiểm tra kết nối thành công: Thiết bị Modbus phản hồi.' };
 
     } catch (error) {
         console.error("Test connection error:", error);
-        let errorMessage = 'Không thể kiểm tra kết nối. Vui lòng kiểm tra lại cấu hình và thiết bị Modbus.';
-        if (error.message.includes('Timed out')) {
-            errorMessage = `Kiểm tra kết nối thất bại: Thiết bị Modbus không phản hồi.
-            Có thể do:
-             - Sai Baud Rate, Data Bits, Parity, Stop Bits.
-             - Sai Slave ID: ${slaveId}
-             - Lỗi dây kết nối, hoặc thiết bị Slave chưa được cấp nguồn.
-             - Địa chỉ thanh ghi ${testAddress} không tồn tại hoặc không thể đọc được.`;
-        } else if (error.message.includes('Port is not open') || error.message.includes('Failed to open serial port')) {
-            errorMessage = `Không thể mở cổng COM ${connectionOptions.comPath} để kiểm tra. Cổng có thể đang bận hoặc không tồn tại.`;
-        }
-        return { success: false, message: errorMessage };
-    } finally {
-        if (tempPortOpened && tempClient) {
-            await tempClient.close(); // Đóng cổng tạm thời nếu nó được mở bởi hàm test
-        }
-        if (tempClient === client) { // Nếu sử dụng client gốc, khôi phục lại Slave ID
-            client.setID(originalSlaveId);
-        }
+        return { success: false, message: `Kiểm tra kết nối thất bại: ${error.message}` };
     }
 });
 
-// --- Hàm dịch mã lỗi Modbus ---
-function translateModbusError(error, address) {
-    // 1. Lỗi Timeout (phổ biến nhất)
-    if (error.message.includes('Timed out')) {
-        return `Thiết bị không phản hồi khi truy cập địa chỉ ${address}. Vui lòng kiểm tra lại Slave ID, kết nối vật lý, hoặc thiết bị có thể đang bị treo.`;
-    }
 
-    // 2. Lỗi có mã ngoại lệ từ thiết bị
-    // Thư viện modbus-serial thường trả về lỗi có dạng 'Modbus exception X: ...'
-    if (error.message.includes('Modbus exception')) {
-        if (error.message.includes('1')) { // ILLEGAL FUNCTION
-            return `Lỗi tại địa chỉ ${address}: Lệnh (function code) không được thiết bị này hỗ trợ.`;
-        }
-        if (error.message.includes('2')) { // ILLEGAL DATA ADDRESS
-            return `Lỗi tại địa chỉ ${address}: Địa chỉ thanh ghi không tồn tại trên thiết bị.`;
-        }
-        if (error.message.includes('3')) { // ILLEGAL DATA VALUE
-            return `Lỗi tại địa chỉ ${address}: Giá trị ghi vào không hợp lệ hoặc nằm ngoài dải cho phép.`;
-        }
-        if (error.message.includes('4')) { // SLAVE DEVICE FAILURE
-            return `Lỗi tại địa chỉ ${address}: Thiết bị Slave báo lỗi nội bộ, không thể xử lý yêu cầu.`;
-        }
+// Đọc thanh ghi (SỬA LẠI ĐỂ DÙNG PROTOCOL TỰ ĐỊNH NGHĨA)
+ipcMain.handle('read-register', async (event, { address, count, slaveId }) => {
+    if (!isPortOpen) {
+        return { success: false, message: 'Không có kết nối SerialPort. Vui lòng kết nối trước.' };
     }
-    
-    // 3. Các lỗi khác
-    return `Lỗi không xác định khi truy cập địa chỉ ${address}: ${error.message}`;
-}
-
-// Đọc thanh ghi
-ipcMain.handle('read-register', async (event, { address, count }) => {
-    if (!checkPortStatus()) {
-        return { success: false, message: 'Không có kết nối Modbus. Vui lòng kết nối trước.' };
-    }
-    client.setID(parseInt(slaveId || '1', 10));
+    const currentID = parseInt(slaveId || '1', 10);
 
     try {
-        const data = await client.readHoldingRegisters(address, count);
-        return { success: true, data: data.data };
+        const requestBuffer = createReadRequest(currentID, address, count);
+        const responseBuffer = await sendRequestAndAwaitResponse(requestBuffer, 1000);
+        
+        // Phân tích phản hồi
+        const parsed = parseResponse(responseBuffer, currentID, 0x03, count);
+
+        return { success: true, data: parsed.data };
     } catch (error) {
         console.error("Modbus read error:", error);
-        let errorMessage = `Lỗi khi đọc địa chỉ ${address}: ${error.message}`;
-        if (error.message.includes('Timed out')) {
-            errorMessage = `Thiết bị Modbus không phản hồi khi đọc địa chỉ ${address}.
-            Kiểm tra: Slave ID, kết nối, hoặc địa chỉ này có thể không tồn tại/không đọc được.`;
-        }
-        return { success: false, message: errorMessage };
+        return { success: false, message: error.message };
     }
 });
 
-// Ghi thanh ghi
-ipcMain.handle('write-register', async (event, { address, value }) => {
-    if (!checkPortStatus()) {
-        return { success: false, message: 'Không có kết nối Modbus. Vui lòng kết nối trước.' };
+// Ghi thanh ghi (SỬA LẠI ĐỂ DÙNG PROTOCOL TỰ ĐỊNH NGHĨA)
+ipcMain.handle('write-register', async (event, { address, value, slaveId }) => {
+    if (!isPortOpen) {
+        return { success: false, message: 'Không có kết nối SerialPort. Vui lòng kết nối trước.' };
     }
-    client.setID(parseInt(slaveId || '1', 10)); 
-
+    const currentID = parseInt(slaveId || '1', 10);
+    
     try {
-        await client.writeRegister(address, value);
+        // Modbus Function Code 0x06: Write Single Holding Register
+        const requestBuffer = createWriteRequest(currentID, address, value);
+        const responseBuffer = await sendRequestAndAwaitResponse(requestBuffer, 1000);
+        
+        // Phân tích phản hồi (chờ FC 0x06)
+        parseResponse(responseBuffer, currentID, 0x06, 1); // 1 là số thanh ghi đã ghi (dummy)
+
         return { success: true, message: `Ghi thành công giá trị ${value} vào địa chỉ ${address}.` };
     } catch (error) {
         console.error("Modbus write error:", error);
-        let errorMessage = `Lỗi khi ghi vào địa chỉ ${address}: ${error.message}`;
-        if (error.message.includes('Timed out')) {
-            errorMessage = `Thiết bị Modbus không phản hồi khi ghi vào địa chỉ ${address}.
-            Kiểm tra: Slave ID, kết nối, hoặc địa chỉ này có thể chỉ đọc/không ghi được.`;
-        }
-        return { success: false, message: errorMessage };
+        return { success: false, message: error.message };
     }
 });

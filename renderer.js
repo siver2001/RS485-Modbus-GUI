@@ -41,7 +41,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateConnectionStatus(isConnected, message) {
         statusDiv.textContent = message;
         btnConnect.disabled = isConnected;
-        btnTestConnection.disabled = isConnected;
+        // Bỏ disabled của Test Connection khi đã kết nối COM thành công
+        btnTestConnection.disabled = !isConnected; 
         btnDisconnect.disabled = !isConnected;
         btnRead.disabled = !isConnected;
         btnWrite.disabled = !isConnected;
@@ -70,12 +71,26 @@ document.addEventListener('DOMContentLoaded', () => {
             stopContinuousRead();
         }
         const quantity = parseInt(document.getElementById('read-quantity').value, 10);
+        const startAddressStr = document.getElementById('read-start-address').value; // Lấy địa chỉ bắt đầu
+        const format = getInputFormat('read'); 
+        const startAddress = parseInput(startAddressStr, format); // Chuyển đổi sang số
+
         readFieldsContainer.innerHTML = '';
+        
         if (isNaN(quantity) || quantity < 1 || quantity > 50) {
-            log('Số lượng không hợp lệ. Vui lòng nhập một số từ 1 đến 50.', 'error');
+            log('Số lượng thanh ghi không hợp lệ. Vui lòng nhập một số từ 1 đến 50.', 'error');
             return;
         }
+        if (isNaN(startAddress)) {
+             log('Địa chỉ bắt đầu không hợp lệ.', 'error');
+             return;
+        }
+        
         for (let i = 0; i < quantity; i++) {
+            const currentAddress = startAddress + i; // Địa chỉ tăng dần
+            // Định dạng lại cho hiển thị (Decimal hoặc Hex)
+            const currentAddressStr = format === 'hex' ? currentAddress.toString(16).toUpperCase() : currentAddress.toString(10); 
+
             const pairDiv = document.createElement('div');
             pairDiv.className = 'dynamic-pair';
             
@@ -83,6 +98,7 @@ document.addEventListener('DOMContentLoaded', () => {
             addressInput.type = 'text';
             addressInput.placeholder = `Địa chỉ #${i + 1}`;
             addressInput.className = 'dynamic-read-address';
+            addressInput.value = currentAddressStr; // TỰ ĐỘNG ĐIỀN ĐỊA CHỈ
             
             const valueDisplay = document.createElement('input');
             valueDisplay.type = 'text';
@@ -94,17 +110,31 @@ document.addEventListener('DOMContentLoaded', () => {
             pairDiv.appendChild(valueDisplay);
             readFieldsContainer.appendChild(pairDiv);
         }
-        log(`Đã tạo ${quantity} cặp ô để đọc địa chỉ.`);
+        log(`Đã tạo ${quantity} cặp ô để đọc địa chỉ, bắt đầu từ ${startAddressStr} (${format.toUpperCase()}).`);
     }
 
     function generateWriteFields() {
         const quantity = parseInt(document.getElementById('write-quantity').value, 10);
+        const startAddressStr = document.getElementById('write-start-address').value; // Lấy địa chỉ bắt đầu
+        const format = getInputFormat('write'); 
+        const startAddress = parseInput(startAddressStr, format); // Chuyển đổi sang số
+
         writeFieldsContainer.innerHTML = '';
+
         if (isNaN(quantity) || quantity < 1 || quantity > 50) {
-            log('Số lượng không hợp lệ. Vui lòng nhập một số từ 1 đến 50.', 'error');
+            log('Số lượng thanh ghi không hợp lệ. Vui lòng nhập một số từ 1 đến 50.', 'error');
             return;
         }
+        if (isNaN(startAddress)) {
+             log('Địa chỉ bắt đầu không hợp lệ.', 'error');
+             return;
+        }
+        
         for (let i = 0; i < quantity; i++) {
+            const currentAddress = startAddress + i; // Địa chỉ tăng dần
+            // Định dạng lại cho hiển thị (Decimal hoặc Hex)
+            const currentAddressStr = format === 'hex' ? currentAddress.toString(16).toUpperCase() : currentAddress.toString(10); 
+
             const pairDiv = document.createElement('div');
             pairDiv.className = 'dynamic-pair';
             
@@ -112,6 +142,7 @@ document.addEventListener('DOMContentLoaded', () => {
             addressInput.type = 'text';
             addressInput.placeholder = `Địa chỉ #${i + 1}`;
             addressInput.className = 'dynamic-write-address';
+            addressInput.value = currentAddressStr; // TỰ ĐỘNG ĐIỀN ĐỊA CHỈ
             
             const valueInput = document.createElement('input');
             valueInput.type = 'text';
@@ -122,49 +153,52 @@ document.addEventListener('DOMContentLoaded', () => {
             pairDiv.appendChild(valueInput);
             writeFieldsContainer.appendChild(pairDiv);
         }
-        log(`Đã tạo ${quantity} cặp ô để ghi địa chỉ/giá trị.`);
+        log(`Đã tạo ${quantity} cặp ô để ghi địa chỉ/giá trị, bắt đầu từ ${startAddressStr} (${format.toUpperCase()}).`);
     }
 
     // --- Logic Đọc Real-time ---
 
     // Vòng lặp đọc chính
     async function readLoop() {
-        if (!isReading) return; // Dừng lại nếu isReading là false
+    if (!isReading) return; // Dừng lại nếu isReading là false
 
-        const format = getInputFormat('read');
-        const addressInputs = document.querySelectorAll('.dynamic-read-address');
-        const valueDisplays = document.querySelectorAll('.dynamic-read-value');
+    const format = getInputFormat('read');
+    const addressInputs = document.querySelectorAll('.dynamic-read-address');
+    const valueDisplays = document.querySelectorAll('.dynamic-read-value');
 
-        const slaveId = document.getElementById('slave-id').value; 
-        // Sử dụng Promise.all để gửi các yêu cầu đọc song song, tăng tốc độ
-        const readPromises = [];
-        for (let i = 0; i < addressInputs.length; i++) {
-            const addressStr = addressInputs[i].value;
-            if (!addressStr.trim()) continue;
+    const slaveId = document.getElementById('slave-id').value; 
 
-            const address = parseInput(addressStr, format);
-            if (isNaN(address)) continue;
-
-            readPromises.push(window.api.readRegister({ address, count: 1, slaveId }));
+    // CHÚ Ý: Thay vì dùng Promise.all (song song), ta dùng vòng lặp for...of để gửi TỪNG lệnh
+    const delayBetweenReads = 100; // Thử nghiệm với độ trễ 100ms giữa các lệnh
+    
+    for (let i = 0; i < addressInputs.length; i++) {
+        if (!isReading) return; // Kiểm tra lại nếu người dùng đã nhấn Huỷ đọc
+        
+        const addressStr = addressInputs[i].value;
+        if (!addressStr.trim()) {
+            valueDisplays[i].value = "";
+            continue;
         }
 
+        const address = parseInput(addressStr, format);
+        if (isNaN(address)) {
+            valueDisplays[i].value = "Lỗi địa chỉ";
+            continue;
+        }
+
+        // Thực hiện lệnh đọc cho từng địa chỉ
         try {
-            const results = await Promise.all(readPromises);
-            let resultIndex = 0;
-            for (let i = 0; i < addressInputs.length; i++) {
-                 const addressStr = addressInputs[i].value;
-                 if (!addressStr.trim() || isNaN(parseInput(addressStr, format))) continue;
-                
-                const result = results[resultIndex];
-                if (result.success) {
-                    valueDisplays[i].value = result.data[0].toString(10);
-                } else {
-                    valueDisplays[i].value = "Lỗi";
-                    log(`Lỗi đọc: ${result.message}`, 'error');
-                    stopContinuousRead(); // Dừng nếu có lỗi
-                    return; // Thoát khỏi vòng lặp
-                }
-                resultIndex++;
+            // Gửi lệnh đọc và chờ phản hồi
+            const result = await window.api.readRegister({ address, count: 1, slaveId });
+            
+            if (result.success) {
+                valueDisplays[i].value = result.data && result.data.length > 0 ? result.data[0].toString(10) : "N/A";
+            } else {
+                valueDisplays[i].value = "Lỗi";
+                log(`Lỗi đọc địa chỉ ${address}: ${result.message}`, 'error');
+                // Tùy chọn: Dừng vòng lặp nếu gặp lỗi nghiêm trọng
+                // stopContinuousRead(); 
+                // return; 
             }
         } catch (error) {
             log(`Lỗi nghiêm trọng khi đọc: ${error.message}`, 'error');
@@ -172,9 +206,13 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Gọi lại chính nó để tạo vòng lặp
-        animationFrameId = requestAnimationFrame(readLoop);
+        // THÊM ĐỘ TRỄ để thiết bị Slave có thời gian xử lý và chuẩn bị cho lệnh tiếp theo
+        await new Promise(resolve => setTimeout(resolve, delayBetweenReads));
     }
+    
+    // Gọi lại chính nó để tạo vòng lặp tiếp theo
+    animationFrameId = requestAnimationFrame(readLoop);
+}
 
     function startContinuousRead() {
         isReading = true;
@@ -232,6 +270,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // SỬA LẠI: Chỉ kết nối COM. Nút Test Connection sẽ kiểm tra Slave ID.
     btnConnect.addEventListener('click', async () => {
         const options = {
             comPath: comPortsSelect.value,
@@ -243,8 +282,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!options.comPath) {
             log('Vui lòng chọn một cổng COM.', 'error'); return;
         }
-        log(`Đang kết nối tới ${options.comPath}...`);
+        log(`Đang kết nối cổng COM: ${options.comPath}...`);
         const result = await window.api.connectModbus(options);
+        
         if (result.success) {
             updateConnectionStatus(true, `ĐÃ KẾT NỐI: ${options.comPath}`);
             log(result.message, 'success');
@@ -264,13 +304,27 @@ document.addEventListener('DOMContentLoaded', () => {
         log(result.message, result.success ? 'info' : 'error');
     });
 
+    // SỬA LẠI: Thực hiện kiểm tra kết nối Slave ID sau khi cổng COM đã mở
     btnTestConnection.addEventListener('click', async () => {
         const connectionOptions = { comPath: comPortsSelect.value, baudRate: document.getElementById('baud-rate').value, parity: document.getElementById('parity').value, dataBits: document.getElementById('data-bits').value, stopBits: document.getElementById('stop-bits').value };
         const slaveId = document.getElementById('slave-id').value;
-        if (!connectionOptions.comPath) { log('Vui lòng chọn một cổng COM.', 'error'); return; }
+        
+        // Kiểm tra xem cổng COM đã được chọn chưa (trước khi gọi API)
+        if (!connectionOptions.comPath) { 
+            log('Lỗi: Vui lòng chọn một cổng COM.', 'error'); 
+            return; 
+        }
+
         log(`Đang kiểm tra kết nối với Slave ID: ${slaveId}...`);
+        
+        // Gọi API testConnection, API này sẽ kiểm tra isPortOpen trước khi gửi lệnh
         const result = await window.api.testConnection({ connectionOptions, slaveId });
-        if (result.success) { log(result.message, 'success'); } else { log(result.message, 'error'); }
+        
+        if (result.success) { 
+            log(result.message, 'success'); 
+        } else { 
+            log(result.message, 'error'); 
+        }
     });
 
     // --- Sự kiện ĐỌC ---
