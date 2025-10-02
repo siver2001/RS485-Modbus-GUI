@@ -9,6 +9,7 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let mainWindow;
 // THAY THẾ: Biến toàn cục để quản lý cổng Serial và trạng thái
 let serialPort = null;
+let modbusParser = null; // <--- THÊM BIẾN TOÀN CỤC MỚI CHO PARSER
 let isPortOpen = false;
 let currentSlaveId = 1;
 
@@ -93,29 +94,35 @@ function createWriteRequest(slaveId, address, value) {
 // Hàm gửi yêu cầu và chờ phản hồi với timeout
 async function sendRequestAndAwaitResponse(requestBuffer, timeout = 2000) {
     return new Promise((resolve, reject) => {
-        if (!serialPort || !serialPort.isOpen) {
-            return reject(new Error('Cổng Serial chưa mở.'));
+        // Cần kiểm tra modbusParser
+        if (!serialPort || !serialPort.isOpen || !modbusParser) {
+            return reject(new Error('Cổng Serial chưa mở hoặc parser chưa khởi tạo.'));
         }
 
         // Đặt timeout cho cả giao dịch
         const timeoutId = setTimeout(() => {
+            // QUAN TRỌNG: Ngừng lắng nghe dữ liệu từ PARSER
+            modbusParser.off('data', onData);
             reject(new Error('Timed out: Thiết bị Modbus không phản hồi.'));
         }, timeout);
 
         // Lắng nghe dữ liệu
         const onData = (data) => {
             clearTimeout(timeoutId); // Xóa timeout nếu có phản hồi
-            serialPort.off('data', onData); // Ngừng lắng nghe để không nhận gói tiếp theo
+            // QUAN TRỌNG: Ngừng lắng nghe từ PARSER
+            modbusParser.off('data', onData); 
             resolve(data);
         };
         
-        serialPort.on('data', onData);
+        // QUAN TRỌNG: Lắng nghe từ modbusParser để nhận gói tin đã được phân khung (framed)
+        modbusParser.on('data', onData);
 
         // Gửi yêu cầu
         serialPort.write(requestBuffer, (err) => {
             if (err) {
                 clearTimeout(timeoutId);
-                serialPort.off('data', onData);
+                // QUAN TRỌNG: Ngừng lắng nghe từ PARSER
+                modbusParser.off('data', onData);
                 reject(new Error(`Lỗi gửi dữ liệu: ${err.message}`));
             }
         });
@@ -200,7 +207,7 @@ function translateModbusException(code) {
 // IPC Handlers
 // ===========================================
 
-// Lấy danh sách cổng COM (Không thay đổi)
+// Lấy danh sách cổng COM (KHÔNG ĐỔI - Vẫn hoạt động bình thường)
 ipcMain.handle('get-com-ports', async () => {
     try {
         const ports = await SerialPort.list(); 
@@ -211,7 +218,7 @@ ipcMain.handle('get-com-ports', async () => {
     }
 });
 
-// Kết nối SerialPort (ĐÃ SỬA)
+// Kết nối SerialPort (ĐÃ THÊM PARSER VÀ FLUSH)
 ipcMain.handle('connect-modbus', async (event, options) => {
     if (serialPort && serialPort.isOpen) {
         return { success: false, message: 'Đã có kết nối SerialPort đang mở. Vui lòng ngắt kết nối trước.' };
@@ -229,8 +236,8 @@ ipcMain.handle('connect-modbus', async (event, options) => {
         });
 
         // Sử dụng parser inter-byte timeout để tự động cắt gói tin Modbus
-        // Giả sử 50ms là đủ cho T3.5 (SerialPort docs khuyến nghị)
         const parser = serialPort.pipe(new InterByteTimeoutParser({ interval: 50 })); 
+        modbusParser = parser; // <--- GÁN OBJECT PARSER VÀO BIẾN TOÀN CỤC
 
         // Đặt timeout chờ mở cổng
         await new Promise((resolve, reject) => {
@@ -242,14 +249,16 @@ ipcMain.handle('connect-modbus', async (event, options) => {
             serialPort.once('open', () => {
                 clearTimeout(openTimeout);
                 isPortOpen = true;
-                // Lắng nghe dữ liệu trên parser
-                parser.on('data', () => {
-                    // Khi parser nhận được một gói tin (một frame Modbus RTU), 
-                    // nó sẽ phát ra sự kiện 'data'.
-                    // Trong trường hợp này, chúng ta sẽ để hàm read/write tự lắng nghe gói tin.
-                    // (Chúng ta không cần xử lý data ở đây, chỉ cần biết cổng mở)
+                
+                // *** Xóa bộ đệm (Flush) và thêm delay nhỏ ***
+                serialPort.flush((flushErr) => {
+                    if (flushErr) {
+                         console.error("Lỗi khi xóa bộ đệm (flush):", flushErr);
+                    }
+                    
+                    // Thêm một độ trễ ngắn sau khi flush để đảm bảo hệ thống stable
+                    delay(50).then(resolve); 
                 });
-                resolve();
             });
             
             serialPort.once('error', (err) => {
@@ -266,7 +275,7 @@ ipcMain.handle('connect-modbus', async (event, options) => {
     }
 });
 
-// Ngắt kết nối SerialPort (ĐÃ SỬA)
+// Ngắt kết nối SerialPort (Cập nhật để reset parser)
 ipcMain.handle('disconnect-modbus', async () => {
     if (!isPortOpen) {
         return { success: false, message: 'Không có kết nối SerialPort nào để ngắt.' };
@@ -277,6 +286,7 @@ ipcMain.handle('disconnect-modbus', async () => {
                 if (err) return reject(err);
                 isPortOpen = false;
                 serialPort = null;
+                modbusParser = null; // <--- RESET PARSER
                 resolve();
             });
         });
@@ -287,7 +297,7 @@ ipcMain.handle('disconnect-modbus', async () => {
     }
 });
 
-// Kiểm tra kết nối (SỬA LẠI ĐỂ DÙNG HÀM READ TỰ ĐỊNH NGHĨA)
+// Kiểm tra kết nối (Sử dụng hàm gửi/nhận đã sửa)
 ipcMain.handle('test-connection', async (event, { slaveId }) => {
     // ĐIỀU KIỆN NÀY ĐANG CHẶN VÀ TRẢ VỀ LỖI NẾU CỔNG CHƯA MỞ
     if (!isPortOpen) {
@@ -301,7 +311,8 @@ ipcMain.handle('test-connection', async (event, { slaveId }) => {
         const count = 1;
         
         const requestBuffer = createReadRequest(testSlaveId, testAddress, count);
-        const responseBuffer = await sendRequestAndAwaitResponse(requestBuffer); 
+        // Sử dụng timeout 2000ms
+        const responseBuffer = await sendRequestAndAwaitResponse(requestBuffer, 2000); 
 
         // Kiểm tra phản hồi (Nếu thành công sẽ không ném lỗi)
         parseResponse(responseBuffer, testSlaveId, 0x03, count); 
@@ -315,7 +326,7 @@ ipcMain.handle('test-connection', async (event, { slaveId }) => {
 });
 
 
-// Đọc thanh ghi (SỬA LẠI ĐỂ DÙNG PROTOCOL TỰ ĐỊNH NGHĨA)
+// Đọc thanh ghi (Sử dụng hàm gửi/nhận đã sửa)
 ipcMain.handle('read-register', async (event, { address, count, slaveId }) => {
     if (!isPortOpen) {
         return { success: false, message: 'Không có kết nối SerialPort. Vui lòng kết nối trước.' };
@@ -324,6 +335,7 @@ ipcMain.handle('read-register', async (event, { address, count, slaveId }) => {
 
     try {
         const requestBuffer = createReadRequest(currentID, address, count);
+        // Sử dụng timeout 1000ms
         const responseBuffer = await sendRequestAndAwaitResponse(requestBuffer, 1000);
         
         // Phân tích phản hồi
@@ -336,7 +348,7 @@ ipcMain.handle('read-register', async (event, { address, count, slaveId }) => {
     }
 });
 
-// Ghi thanh ghi (SỬA LẠI ĐỂ DÙNG PROTOCOL TỰ ĐỊNH NGHĨA)
+// Ghi thanh ghi (Sử dụng hàm gửi/nhận đã sửa)
 ipcMain.handle('write-register', async (event, { address, value, slaveId }) => {
     if (!isPortOpen) {
         return { success: false, message: 'Không có kết nối SerialPort. Vui lòng kết nối trước.' };
@@ -346,6 +358,7 @@ ipcMain.handle('write-register', async (event, { address, value, slaveId }) => {
     try {
         // Modbus Function Code 0x06: Write Single Holding Register
         const requestBuffer = createWriteRequest(currentID, address, value);
+        // Sử dụng timeout 1000ms
         const responseBuffer = await sendRequestAndAwaitResponse(requestBuffer, 1000);
         
         // Phân tích phản hồi (chờ FC 0x06)

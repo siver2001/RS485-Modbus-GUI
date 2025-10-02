@@ -119,27 +119,48 @@
         .tab-button.active { border-bottom-color: var(--primary-color); font-weight: bold; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
+        
+        /* CẬP NHẬT CSS quan trọng cho 4 CẶP CỘT (8 cột) */
         .dynamic-fields-container {
-            max-height: 180px; /* Giảm max-height của khu vực nhập địa chỉ động */
+            max-height: 250px; /* Tăng max-height để hiển thị 20 thanh ghi (4x5) */
             overflow-y: auto;
             padding: 8px;
             border: 1px solid #eee;
             border-radius: 4px;
             margin-top: 8px;
-        }
-        .dynamic-pair {
+            /* Thiết lập Grid 8 cột: 4 lần lặp (Address 1fr, Value 1fr) */
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px; /* Giảm gap */
-            margin-bottom: 8px; /* Giảm margin */
+            grid-template-columns: repeat(4, minmax(0, 1fr) minmax(0, 1fr)); 
+            gap: 5px; /* Giảm gap giữa các ô input */
         }
+        /* Dùng display: contents để các input con được đặt trực tiếp vào grid 8 cột */
+        .dynamic-pair { display: contents; } 
+        
         .confirm-quantity-group { display: flex; gap: 8px; align-items: center; } /* Giảm gap */
         .confirm-quantity-group input { flex-grow: 1; }
         .confirm-quantity-group button { width: 100px; padding: 8px; font-size: 0.9em; } /* Giảm kích thước nút confirm */
-        .fields-header {
-             display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-weight: bold;
-             padding: 0 8px; margin-top: 10px; font-size: 0.9em; /* Giảm padding và cỡ chữ */
+        
+        /* Cấu trúc Header MỚI cho 4 cặp cột */
+        .multi-column-header {
+             display: grid;
+             /* 4 cặp cột, mỗi cặp gồm Address (1fr) và Value (1fr) */
+             grid-template-columns: repeat(4, 1fr 1fr); 
+             gap: 5px; /* Đồng bộ gap với container */
+             font-weight: bold;
+             padding: 0 8px; 
+             margin-top: 10px; 
+             font-size: 0.9em;
         }
+        .header-col {
+            text-align: left;
+        }
+        
+        /* *** THAY ĐỔI ĐỂ LÀM NỔI BẬT GIÁ TRỊ *** */
+        .dynamic-read-value {
+            font-weight: bold;
+            color: var(--primary-color); /* Màu xanh dương để nổi bật */
+        }
+        /* *************************************** */
     </style>
 </head>
 <body>
@@ -187,7 +208,7 @@
                 <button class="tab-button" data-tab="write-tab">Ghi Thanh Ghi</button>
             </div>
 
-            <<div id="read-tab" class="tab-content active">
+            <div id="read-tab" class="tab-content active">
                 <h2>Đọc nhiều địa chỉ</h2>
                 <div class="form-group radio-group">
                     <label>Định dạng địa chỉ nhập:</label>
@@ -205,10 +226,18 @@
                         <button id="btn-confirm-read-quantity">Xác nhận</button>
                     </div>
                 </div>
-                <div class="fields-header">
-                    <span>Địa chỉ thanh ghi</span>
-                    <span>Giá trị đọc về (Decimal)</span>
+                
+                <div class="multi-column-header">
+                    <span class="header-col">Địa chỉ</span>
+                    <span class="header-col">Giá trị</span>
+                    <span class="header-col">Địa chỉ</span>
+                    <span class="header-col">Giá trị</span>
+                    <span class="header-col">Địa chỉ</span>
+                    <span class="header-col">Giá trị</span>
+                    <span class="header-col">Địa chỉ</span>
+                    <span class="header-col">Giá trị</span>
                 </div>
+                
                 <div id="read-fields-container" class="dynamic-fields-container"></div>
                 <button id="btn-read" disabled style="margin-top: 15px;">Thực hiện Đọc</button>
             </div>
@@ -231,10 +260,12 @@
                         <button id="btn-confirm-write-quantity">Xác nhận</button>
                     </div>
                 </div>
+                
                 <div class="fields-header">
                     <span>Địa chỉ thanh ghi</span>
                     <span>Giá trị cần ghi (Decimal)</span>
                 </div>
+                
                 <div id="write-fields-container" class="dynamic-fields-container"></div>
                 <button id="btn-write" disabled style="margin-top: 15px;">Thực hiện Ghi</button>
             </div>

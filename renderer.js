@@ -1,4 +1,24 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // --- Persistence Keys ---
+    const STORAGE_KEYS = {
+        // Settings
+        BAUD_RATE: 'baudRate',
+        DATA_BITS: 'dataBits',
+        PARITY: 'parity',
+        STOP_BITS: 'stopBits',
+        SLAVE_ID: 'slaveId',
+        // Read Tab
+        READ_FORMAT: 'readFormat',
+        READ_START_ADDRESS: 'readStartAddress',
+        READ_QUANTITY: 'readQuantity',
+        READ_FIELDS: 'readFields', // Stores dynamic addresses/values
+        // Write Tab
+        WRITE_FORMAT: 'writeFormat',
+        WRITE_START_ADDRESS: 'writeStartAddress',
+        WRITE_QUANTITY: 'writeQuantity',
+        WRITE_FIELDS: 'writeFields' // Stores dynamic addresses/values
+    };
+    
     // --- Lấy các phần tử DOM ---
     const comPortsSelect = document.getElementById('com-ports');
     const statusDiv = document.getElementById('status');
@@ -25,8 +45,173 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Biến trạng thái cho việc đọc liên tục ---
     let isReading = false;
-    let animationFrameId = null; // Thay thế cho intervalId
+    let timeoutId = null; 
 
+    // --- Persistence Functions ---
+    function saveState() {
+        // 1. Save Connection Settings
+        localStorage.setItem(STORAGE_KEYS.BAUD_RATE, document.getElementById('baud-rate').value);
+        localStorage.setItem(STORAGE_KEYS.DATA_BITS, document.getElementById('data-bits').value);
+        localStorage.setItem(STORAGE_KEYS.PARITY, document.getElementById('parity').value);
+        localStorage.setItem(STORAGE_KEYS.STOP_BITS, document.getElementById('stop-bits').value);
+        localStorage.setItem(STORAGE_KEYS.SLAVE_ID, document.getElementById('slave-id').value);
+
+        // 2. Save Read Settings
+        const readFormat = getInputFormat('read');
+        localStorage.setItem(STORAGE_KEYS.READ_FORMAT, readFormat);
+        localStorage.setItem(STORAGE_KEYS.READ_START_ADDRESS, document.getElementById('read-start-address').value);
+        localStorage.setItem(STORAGE_KEYS.READ_QUANTITY, document.getElementById('read-quantity').value);
+
+        // 3. Save Dynamic Read Fields (Addresses and Values)
+        const readFields = [];
+        const readAddresses = document.querySelectorAll('.dynamic-read-address');
+        const readValues = document.querySelectorAll('.dynamic-read-value');
+        readAddresses.forEach((addrInput, i) => {
+            readFields.push({
+                address: addrInput.value,
+                value: readValues[i].value 
+            });
+        });
+        if (readFields.length > 0) {
+            localStorage.setItem(STORAGE_KEYS.READ_FIELDS, JSON.stringify(readFields));
+        } else {
+            localStorage.removeItem(STORAGE_KEYS.READ_FIELDS);
+        }
+        
+        // 4. Save Write Settings
+        const writeFormat = getInputFormat('write');
+        localStorage.setItem(STORAGE_KEYS.WRITE_FORMAT, writeFormat);
+        localStorage.setItem(STORAGE_KEYS.WRITE_START_ADDRESS, document.getElementById('write-start-address').value);
+        localStorage.setItem(STORAGE_KEYS.WRITE_QUANTITY, document.getElementById('write-quantity').value);
+
+        // 5. Save Dynamic Write Fields (Addresses and Values)
+        const writeFields = [];
+        const writeAddresses = document.querySelectorAll('.dynamic-write-address');
+        const writeValues = document.querySelectorAll('.dynamic-write-value');
+        writeAddresses.forEach((addrInput, i) => {
+            writeFields.push({
+                address: addrInput.value,
+                value: writeValues[i].value 
+            });
+        });
+        if (writeFields.length > 0) {
+            localStorage.setItem(STORAGE_KEYS.WRITE_FIELDS, JSON.stringify(writeFields));
+        } else {
+            localStorage.removeItem(STORAGE_KEYS.WRITE_FIELDS);
+        }
+    }
+
+    // Helper to load simple values and set inputs
+    function loadAndSetInput(id, key) {
+        const savedValue = localStorage.getItem(key);
+        if (savedValue) {
+            const element = document.getElementById(id);
+            if (element) {
+                element.value = savedValue;
+            }
+        }
+    }
+
+    // Function to generate/restore dynamic fields based on saved data
+    function loadDynamicFields(tabName) {
+        const key = tabName === 'read' ? STORAGE_KEYS.READ_FIELDS : STORAGE_KEYS.WRITE_FIELDS;
+        const container = tabName === 'read' ? readFieldsContainer : writeFieldsContainer;
+        const quantityId = tabName === 'read' ? 'read-quantity' : 'write-quantity';
+        const startAddressId = tabName === 'read' ? 'read-start-address' : 'write-start-address';
+        
+        const savedFieldsStr = localStorage.getItem(key);
+        if (!savedFieldsStr) {
+            // Fallback to generating default fields
+            tabName === 'read' ? generateReadFields(true) : generateWriteFields(true);
+            return;
+        }
+
+        try {
+            const savedFields = JSON.parse(savedFieldsStr);
+            if (!savedFields || savedFields.length === 0) {
+                tabName === 'read' ? generateReadFields(true) : generateWriteFields(true);
+                return;
+            }
+
+            // Restore quantity and address inputs based on the first saved field
+            const savedQuantity = savedFields.length;
+            const savedStartAddress = savedFields[0].address;
+            
+            // Chỉ khôi phục giá trị nếu hợp lệ với giới hạn
+            if (savedQuantity >= 1 && savedQuantity <= (tabName === 'read' ? 20 : 50)) {
+                 document.getElementById(quantityId).value = savedQuantity;
+            }
+
+            document.getElementById(startAddressId).value = savedStartAddress;
+
+            container.innerHTML = '';
+            
+            savedFields.forEach((field, i) => {
+                const addressInput = document.createElement('input');
+                addressInput.type = 'text';
+                addressInput.placeholder = `Địa chỉ #${i + 1}`;
+                addressInput.className = `dynamic-${tabName}-address`;
+                addressInput.value = field.address; 
+                
+                const valueInput = document.createElement('input');
+                valueInput.type = 'text';
+                valueInput.placeholder = `Giá trị${tabName === 'write' ? ' (Dec)' : ''} #${i + 1}`;
+                valueInput.className = `dynamic-${tabName}-value`;
+                valueInput.value = field.value; 
+                
+                if (tabName === 'read') {
+                    valueInput.disabled = true;
+                    valueInput.classList.add('dynamic-read-value'); // Đảm bảo lớp cho CSS làm nổi bật
+                } else {
+                    valueInput.classList.add('dynamic-write-value');
+                }
+                
+                container.appendChild(addressInput);
+                container.appendChild(valueInput);
+            });
+
+            // Không cần log khi khôi phục, chỉ cần log khi tạo mới (generateReadFields/generateWriteFields)
+
+        } catch (e) {
+            console.error(`Error loading ${tabName} fields:`, e);
+            // Fallback
+            tabName === 'read' ? generateReadFields(true) : generateWriteFields(true); 
+        }
+    }
+
+
+    function loadState() {
+        // 1. Load Connection Settings
+        loadAndSetInput('baud-rate', STORAGE_KEYS.BAUD_RATE);
+        loadAndSetInput('data-bits', STORAGE_KEYS.DATA_BITS);
+        loadAndSetInput('parity', STORAGE_KEYS.PARITY);
+        loadAndSetInput('stop-bits', STORAGE_KEYS.STOP_BITS);
+        loadAndSetInput('slave-id', STORAGE_KEYS.SLAVE_ID);
+
+        // 2. Load Read/Write Settings (excluding dynamic inputs)
+        loadAndSetInput('read-start-address', STORAGE_KEYS.READ_START_ADDRESS);
+        loadAndSetInput('read-quantity', STORAGE_KEYS.READ_QUANTITY);
+        loadAndSetInput('write-start-address', STORAGE_KEYS.WRITE_START_ADDRESS);
+        loadAndSetInput('write-quantity', STORAGE_KEYS.WRITE_QUANTITY);
+        
+        // Restore radio button state
+        const savedReadFormat = localStorage.getItem(STORAGE_KEYS.READ_FORMAT);
+        if (savedReadFormat) {
+            const radio = document.querySelector(`input[name="read-format"][value="${savedReadFormat}"]`);
+            if (radio) radio.checked = true;
+        }
+        
+        const savedWriteFormat = localStorage.getItem(STORAGE_KEYS.WRITE_FORMAT);
+        if (savedWriteFormat) {
+            const radio = document.querySelector(`input[name="write-format"][value="${savedWriteFormat}"]`);
+            if (radio) radio.checked = true;
+        }
+        
+        // 3. Restore Dynamic Fields. 
+        loadDynamicFields('read');
+        loadDynamicFields('write');
+    }
+    
     // --- Các hàm hỗ trợ ---
     function log(message, type = 'info') {
         const p = document.createElement('p');
@@ -41,7 +226,6 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateConnectionStatus(isConnected, message) {
         statusDiv.textContent = message;
         btnConnect.disabled = isConnected;
-        // Bỏ disabled của Test Connection khi đã kết nối COM thành công
         btnTestConnection.disabled = !isConnected; 
         btnDisconnect.disabled = !isConnected;
         btnRead.disabled = !isConnected;
@@ -57,7 +241,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function getInputFormat(tabName) {
-        return document.querySelector(`input[name="${tabName}-format"]:checked`).value;
+        const radio = document.querySelector(`input[name="${tabName}-format"]:checked`);
+        return radio ? radio.value : 'dec';
     }
 
     function parseInput(value, format) {
@@ -66,169 +251,155 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     // --- Logic cho Giao diện Động ---
-    function generateReadFields() {
+    // Thêm tham số isRestoring để kiểm soát việc lưu và log khi khôi phục trạng thái
+    function generateReadFields(isRestoring = false) {
         if (isReading) {
             stopContinuousRead();
         }
         const quantity = parseInt(document.getElementById('read-quantity').value, 10);
-        const startAddressStr = document.getElementById('read-start-address').value; // Lấy địa chỉ bắt đầu
+        const startAddressStr = document.getElementById('read-start-address').value; 
         const format = getInputFormat('read'); 
-        const startAddress = parseInput(startAddressStr, format); // Chuyển đổi sang số
+        const startAddress = parseInput(startAddressStr, format); 
 
         readFieldsContainer.innerHTML = '';
         
-        if (isNaN(quantity) || quantity < 1 || quantity > 50) {
-            log('Số lượng thanh ghi không hợp lệ. Vui lòng nhập một số từ 1 đến 50.', 'error');
+        if (isNaN(quantity) || quantity < 1 || quantity > 20) {
+            if (!isRestoring) log('Số lượng thanh ghi không hợp lệ. Vui lòng nhập một số từ 1 đến 20.', 'error');
             return;
         }
         if (isNaN(startAddress)) {
-             log('Địa chỉ bắt đầu không hợp lệ.', 'error');
+             if (!isRestoring) log('Địa chỉ bắt đầu không hợp lệ.', 'error');
              return;
         }
         
         for (let i = 0; i < quantity; i++) {
-            const currentAddress = startAddress + i; // Địa chỉ tăng dần
-            // Định dạng lại cho hiển thị (Decimal hoặc Hex)
+            const currentAddress = startAddress + i; 
             const currentAddressStr = format === 'hex' ? currentAddress.toString(16).toUpperCase() : currentAddress.toString(10); 
 
-            const pairDiv = document.createElement('div');
-            pairDiv.className = 'dynamic-pair';
-            
             const addressInput = document.createElement('input');
             addressInput.type = 'text';
             addressInput.placeholder = `Địa chỉ #${i + 1}`;
             addressInput.className = 'dynamic-read-address';
-            addressInput.value = currentAddressStr; // TỰ ĐỘNG ĐIỀN ĐỊA CHỈ
+            addressInput.value = currentAddressStr; 
             
             const valueDisplay = document.createElement('input');
             valueDisplay.type = 'text';
-            valueDisplay.placeholder = `Giá trị đọc về`;
+            valueDisplay.placeholder = `Giá trị`;
             valueDisplay.className = 'dynamic-read-value';
             valueDisplay.disabled = true;
             
-            pairDiv.appendChild(addressInput);
-            pairDiv.appendChild(valueDisplay);
-            readFieldsContainer.appendChild(pairDiv);
+            readFieldsContainer.appendChild(addressInput);
+            readFieldsContainer.appendChild(valueDisplay);
         }
-        log(`Đã tạo ${quantity} cặp ô để đọc địa chỉ, bắt đầu từ ${startAddressStr} (${format.toUpperCase()}).`);
+        if (!isRestoring) {
+            log(`Đã tạo ${quantity} cặp ô để đọc địa chỉ, bắt đầu từ ${startAddressStr} (${format.toUpperCase()}).`);
+            saveState(); // Lưu trạng thái sau khi tạo mới
+        }
     }
 
-    function generateWriteFields() {
+    // Thêm tham số isRestoring để kiểm soát việc lưu và log khi khôi phục trạng thái
+    function generateWriteFields(isRestoring = false) {
         const quantity = parseInt(document.getElementById('write-quantity').value, 10);
-        const startAddressStr = document.getElementById('write-start-address').value; // Lấy địa chỉ bắt đầu
+        const startAddressStr = document.getElementById('write-start-address').value; 
         const format = getInputFormat('write'); 
-        const startAddress = parseInput(startAddressStr, format); // Chuyển đổi sang số
+        const startAddress = parseInput(startAddressStr, format); 
 
         writeFieldsContainer.innerHTML = '';
 
-        if (isNaN(quantity) || quantity < 1 || quantity > 50) {
-            log('Số lượng thanh ghi không hợp lệ. Vui lòng nhập một số từ 1 đến 50.', 'error');
+        if (isNaN(quantity) || quantity < 1 || quantity > 20) {
+            if (!isRestoring) log('Số lượng thanh ghi không hợp lệ. Vui lòng nhập một số từ 1 đến 20.', 'error');
             return;
         }
         if (isNaN(startAddress)) {
-             log('Địa chỉ bắt đầu không hợp lệ.', 'error');
+             if (!isRestoring) log('Địa chỉ bắt đầu không hợp lệ.', 'error');
              return;
         }
         
         for (let i = 0; i < quantity; i++) {
-            const currentAddress = startAddress + i; // Địa chỉ tăng dần
-            // Định dạng lại cho hiển thị (Decimal hoặc Hex)
+            const currentAddress = startAddress + i; 
             const currentAddressStr = format === 'hex' ? currentAddress.toString(16).toUpperCase() : currentAddress.toString(10); 
 
-            const pairDiv = document.createElement('div');
-            pairDiv.className = 'dynamic-pair';
-            
             const addressInput = document.createElement('input');
             addressInput.type = 'text';
             addressInput.placeholder = `Địa chỉ #${i + 1}`;
             addressInput.className = 'dynamic-write-address';
-            addressInput.value = currentAddressStr; // TỰ ĐỘNG ĐIỀN ĐỊA CHỈ
+            addressInput.value = currentAddressStr; 
             
             const valueInput = document.createElement('input');
             valueInput.type = 'text';
             valueInput.placeholder = `Giá trị (Dec) #${i + 1}`;
             valueInput.className = 'dynamic-write-value';
             
-            pairDiv.appendChild(addressInput);
-            pairDiv.appendChild(valueInput);
-            writeFieldsContainer.appendChild(pairDiv);
+            writeFieldsContainer.appendChild(addressInput);
+            writeFieldsContainer.appendChild(valueInput);
         }
-        log(`Đã tạo ${quantity} cặp ô để ghi địa chỉ/giá trị, bắt đầu từ ${startAddressStr} (${format.toUpperCase()}).`);
+        if (!isRestoring) {
+             log(`Đã tạo ${quantity} cặp ô để ghi địa chỉ/giá trị, bắt đầu từ ${startAddressStr} (${format.toUpperCase()}).`);
+             saveState(); // Lưu trạng thái sau khi tạo mới
+        }
     }
 
-    // --- Logic Đọc Real-time ---
-
-    // Vòng lặp đọc chính
+    // Vòng lặp đọc chính (Logic Polling giữ nguyên)
     async function readLoop() {
-    if (!isReading) return; // Dừng lại nếu isReading là false
+        if (!isReading) return;
 
-    const format = getInputFormat('read');
-    const addressInputs = document.querySelectorAll('.dynamic-read-address');
-    const valueDisplays = document.querySelectorAll('.dynamic-read-value');
-
-    const slaveId = document.getElementById('slave-id').value; 
-
-    // CHÚ Ý: Thay vì dùng Promise.all (song song), ta dùng vòng lặp for...of để gửi TỪNG lệnh
-    const delayBetweenReads = 100; // Thử nghiệm với độ trễ 100ms giữa các lệnh
-    
-    for (let i = 0; i < addressInputs.length; i++) {
-        if (!isReading) return; // Kiểm tra lại nếu người dùng đã nhấn Huỷ đọc
+        const format = getInputFormat('read');
+        const addressInputs = document.querySelectorAll('.dynamic-read-address');
+        const valueDisplays = document.querySelectorAll('.dynamic-read-value');
+        const slaveId = document.getElementById('slave-id').value; 
+        const delayBetweenReads = 10; 
         
-        const addressStr = addressInputs[i].value;
-        if (!addressStr.trim()) {
-            valueDisplays[i].value = "";
-            continue;
-        }
-
-        const address = parseInput(addressStr, format);
-        if (isNaN(address)) {
-            valueDisplays[i].value = "Lỗi địa chỉ";
-            continue;
-        }
-
-        // Thực hiện lệnh đọc cho từng địa chỉ
-        try {
-            // Gửi lệnh đọc và chờ phản hồi
-            const result = await window.api.readRegister({ address, count: 1, slaveId });
+        for (let i = 0; i < addressInputs.length; i++) {
+            if (!isReading) return;
             
-            if (result.success) {
-                valueDisplays[i].value = result.data && result.data.length > 0 ? result.data[0].toString(10) : "N/A";
-            } else {
-                valueDisplays[i].value = "Lỗi";
-                log(`Lỗi đọc địa chỉ ${address}: ${result.message}`, 'error');
-                // Tùy chọn: Dừng vòng lặp nếu gặp lỗi nghiêm trọng
-                // stopContinuousRead(); 
-                // return; 
+            const addressStr = addressInputs[i].value;
+            if (!addressStr.trim()) {
+                valueDisplays[i].value = "";
+                continue;
             }
-        } catch (error) {
-            log(`Lỗi nghiêm trọng khi đọc: ${error.message}`, 'error');
-            stopContinuousRead();
-            return;
-        }
 
-        // THÊM ĐỘ TRỄ để thiết bị Slave có thời gian xử lý và chuẩn bị cho lệnh tiếp theo
-        await new Promise(resolve => setTimeout(resolve, delayBetweenReads));
+            const address = parseInput(addressStr, format);
+            if (isNaN(address)) {
+                valueDisplays[i].value = "Lỗi địa chỉ";
+                continue;
+            }
+
+            try {
+                const result = await window.api.readRegister({ address, count: 1, slaveId });
+                
+                if (result.success) {
+                    valueDisplays[i].value = result.data && result.data.length > 0 ? result.data[0].toString(10) : "N/A";
+                    saveState(); // Lưu giá trị mới nhất sau khi đọc thành công
+                } else {
+                    valueDisplays[i].value = "Lỗi";
+                    log(`Lỗi đọc địa chỉ ${address} (${format.toUpperCase()}): ${result.message}`, 'error');
+                }
+            } catch (error) {
+                log(`Lỗi nghiêm trọng khi đọc: ${error.message}`, 'error');
+                stopContinuousRead();
+                return;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, delayBetweenReads));
+        }
+        
+        const delayBetweenCycles = 20;
+        timeoutId = setTimeout(readLoop, delayBetweenCycles);
     }
-    
-    // Gọi lại chính nó để tạo vòng lặp tiếp theo
-    animationFrameId = requestAnimationFrame(readLoop);
-}
 
     function startContinuousRead() {
         isReading = true;
         btnRead.textContent = 'Huỷ Đọc';
         btnRead.classList.add('reading');
         log('Bắt đầu đọc real-time...');
-        
-        // Bắt đầu vòng lặp
         readLoop();
     }
 
     function stopContinuousRead() {
-        if (animationFrameId) {
-            cancelAnimationFrame(animationFrameId);
+        if (timeoutId) {
+            clearTimeout(timeoutId);
         }
-        animationFrameId = null;
+        timeoutId = null;
         isReading = false;
         btnRead.textContent = 'Thực hiện Đọc';
         btnRead.classList.remove('reading');
@@ -251,14 +422,57 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             log(`Đã tìm thấy ${ports.length} cổng COM.`);
         }
+        // Khôi phục cổng COM đã chọn (nếu có) sau khi tải danh sách
+        const savedComPath = localStorage.getItem('comPath');
+        if (savedComPath && document.querySelector(`option[value="${savedComPath}"]`)) {
+            comPortsSelect.value = savedComPath;
+        }
+        comPortsSelect.addEventListener('change', (e) => localStorage.setItem('comPath', e.target.value));
     }
-    loadComPorts();
-    generateReadFields();
-    generateWriteFields();
+    
+    // ----------------------------------------------------
+    // *** KHÔI PHỤC TRẠNG THÁI NGAY KHI TẢI TRANG ***
+    loadState(); 
+    // ----------------------------------------------------
+    
+    // Khởi tạo cổng COM (Phải chạy sau loadState để đảm bảo giá trị input được load)
+    loadComPorts(); 
 
+    // Gắn Event Listeners để LƯU TRẠNG THÁI NGAY LẬP TỨC khi có thay đổi
+    // Connection Settings listeners
+    document.getElementById('baud-rate').addEventListener('change', saveState);
+    document.getElementById('data-bits').addEventListener('change', saveState);
+    document.getElementById('parity').addEventListener('change', saveState);
+    document.getElementById('stop-bits').addEventListener('change', saveState);
+    document.getElementById('slave-id').addEventListener('input', saveState);
+    
+    // Read Settings listeners
+    document.getElementById('read-start-address').addEventListener('input', saveState);
+    document.getElementById('read-quantity').addEventListener('input', saveState);
+    document.querySelectorAll('input[name="read-format"]').forEach(radio => {
+        radio.addEventListener('change', saveState);
+    });
+    
+    // Write Settings listeners
+    document.getElementById('write-start-address').addEventListener('input', saveState);
+    document.getElementById('write-quantity').addEventListener('input', saveState);
+    document.querySelectorAll('input[name="write-format"]').forEach(radio => {
+        radio.addEventListener('change', saveState);
+    });
+    
+    // Dynamic field changes (manual typing of addresses/values)
+    readFieldsContainer.addEventListener('input', saveState);
+    writeFieldsContainer.addEventListener('input', saveState);
+    
+    // Button listeners
     btnRefreshCom.addEventListener('click', loadComPorts);
-    btnConfirmRead.addEventListener('click', generateReadFields);
-    btnConfirmWrite.addEventListener('click', generateWriteFields);
+    
+    btnConfirmRead.addEventListener('click', () => {
+        generateReadFields(); // Tự gọi saveState bên trong nếu không phải restoring
+    });
+    btnConfirmWrite.addEventListener('click', () => {
+        generateWriteFields(); // Tự gọi saveState bên trong nếu không phải restoring
+    });
 
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
@@ -336,7 +550,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     
-    // --- Sự kiện GHI ---
+    // --- Sự kiện GHI (Logic này đã là tuần tự và được giữ nguyên) ---
     btnWrite.addEventListener('click', async () => {
         if (isReading) {
             log('Vui lòng dừng đọc trước khi thực hiện ghi.', 'error');
@@ -351,6 +565,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         log(`Bắt đầu ghi vào ${addressInputs.length} địa chỉ...`);
 
+        // Vòng lặp for với 'await' đảm bảo lệnh ghi tuần tự
         for (let i = 0; i < addressInputs.length; i++) {
             const addressStr = addressInputs[i].value;
             const valueStr = valueInputs[i].value;
@@ -374,6 +589,11 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 log(`<-- Lỗi khi ghi vào địa chỉ ${address}: ${result.message}`, 'error');
             }
+            
+            // LƯU TRẠNG THÁI SAU KHI GHI XONG
+            saveState(); 
+            // THÊM ĐỘ TRỄ NHỎ GIỮA CÁC LỆNH GHI (Tương tự như khi đọc)
+            await new Promise(resolve => setTimeout(resolve, 10)); 
         }
         log('Hoàn tất quá trình ghi.');
     });
